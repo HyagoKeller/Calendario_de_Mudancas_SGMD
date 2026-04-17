@@ -2,291 +2,298 @@
 
 **Documento**: Guia de Integracao ITSM
 **Sistema**: SGMD - Servico de Gerenciamento de Mudancas
-**Data**: Abril de 2026
+**Data**: Abril de 2026 (Atualizado: 17/04/2026)
 **Classificacao**: Uso Interno - DTI
-**Objetivo**: Orientar os analistas sobre os dados necessarios para configurar a integracao entre o SGMD e o InvGate Service Management
+**Objetivo**: Orientar os analistas sobre a integracao entre o SGMD e o InvGate Service Management
 
 ---
 
 ## 1. Visao Geral da Integracao
 
-O SGMD sera integrado ao InvGate Service Management para **sincronizar automaticamente** os registros de mudanca (RFCs). Com essa integracao, as mudancas cadastradas/aprovadas/executadas/canceladas no InvGate serao refletidas no calendario do SGMD sem necessidade de cadastro manual duplo.
+O InvGate Service Management envia mudancas automaticamente para o SGMD atraves de um **Web Service** configurado no workflow. Quando um ticket de mudanca e criado/aprovado no InvGate, os dados sao enviados via POST para o SGMD e aparecem no calendario.
 
-### 1.1 Fluxo da Integracao
+### 1.1 Fluxo da Integracao (Implementado)
 
 ```
 InvGate Service Management
-        |
-        | (API REST / HTTP Basic Auth)
-        |
-        v
-   Backend SGMD (FastAPI)
-        |
-        v
-   MongoDB (changes)
-        |
-        v
-   Frontend SGMD (Calendario)
+   Workflow:
+     1. Inicio (Formulario)
+     2. Web Service (Integrations)  ──────┐
+     3. Execucao da Mudanca INFRA         |
+     4. E-mail com relatorio de MUD       |
+                                          |
+                                          v
+              POST https://sgmd.agu.gov.br/api/changes
+              Authorization: Basic (SGMD-Integracao)
+              Content-Type: application/json
+                                          |
+                                          v
+                                Backend SGMD (FastAPI)
+                                          |
+                                          v
+                                MongoDB (changes) -> Calendario
 ```
 
 ### 1.2 Direcao da Sincronizacao
 
-| Direcao | Descricao |
-|---|---|
-| **InvGate -> SGMD** | Mudancas registradas no InvGate sao importadas para o calendario do SGMD |
-| **SGMD -> InvGate** (futuro) | Mudancas criadas no SGMD podem ser enviadas ao InvGate |
+| Direcao | Status | Descricao |
+|---|---|---|
+| **InvGate -> SGMD** | ATIVO | Mudancas do InvGate sao enviadas automaticamente via Web Service |
+| **SGMD -> InvGate** | Futuro | Mudancas criadas no SGMD podem ser enviadas ao InvGate |
 
 ---
 
-## 2. Metodo de Autenticacao - HTTP Basic Auth (Credenciais Basicas)
+## 2. Metodo de Autenticacao - HTTP Basic Auth
 
-A autenticacao com a API do InvGate utiliza **HTTP Basic Authentication** (Credenciais basicas), configurada nas **Credenciais Globais** do InvGate.
+### IMPORTANTE - Mudancas em relacao a versao anterior
 
-> **IMPORTANTE**: O metodo anterior (OAuth2 Bearer Token) foi **removido**. A integracao utiliza exclusivamente HTTP Basic Auth.
+| Item | Versao Anterior | Versao Atual |
+|---|---|---|
+| **Autenticacao InvGate** | OAuth2 Bearer Token (gerava token a cada requisicao) | HTTP Basic Auth (credenciais fixas) |
+| **Token por requisicao** | Sim (problema: cada request gerava um token novo) | Nao. Credenciais enviadas direto no header |
+| **Configuracao no InvGate** | Manual (token URL, client_id, client_secret) | Credenciais salvas: SGMD-Integracao |
 
-### 2.1 Configuracao no InvGate
+### 2.1 Configuracao no InvGate (Web Service)
 
-Acesse no InvGate: **Integracoes > Credenciais globais**
+Na etapa **Web Service** do workflow:
+
+| Campo | Valor |
+|---|---|
+| **Endereco URL** | `https://sgmd.agu.gov.br/api/changes` |
+| **Metodo** | POST |
+| **Modo de autenticacao** | Credenciais salvas |
+| **Credencial** | SGMD-Integracao |
+| **Formato de envio de dados** | JSON |
+
+### 2.2 Credenciais Globais no InvGate
+
+Acesse: **Integracoes > Credenciais globais > SGMD-Integracao**
 
 | Campo | Valor |
 |---|---|
 | **Alias** | SGMD-Integracao |
-| **Descricao** | Credencial para integracao com o Calendario SGMD |
 | **Autenticacao** | HTTP (Credenciais basicas) |
 | **Usuario** | Keller |
 | **Senha** | (configurada no InvGate) |
 
-### 2.2 Configuracao no SGMD (backend/.env)
+### 2.3 Como Funciona
 
-| Variavel | Descricao |
-|---|---|
-| `INVGATE_BASE_URL` | URL base do InvGate (ex: `https://aguservicos.agu.gov.br`) |
-| `INVGATE_USER` | Usuario configurado nas Credenciais Globais do InvGate |
-| `INVGATE_PASSWORD` | Senha do usuario |
-
-### 2.3 Como Funciona a Autenticacao
-
-Todas as chamadas a API do InvGate incluem o header HTTP `Authorization` com as credenciais codificadas em Base64:
-
+O InvGate envia automaticamente o header HTTP:
 ```
-Authorization: Basic base64(usuario:senha)
+Authorization: Basic base64(Keller:senha)
 ```
 
-Exemplo pratico:
-```
-GET https://aguservicos.agu.gov.br/api/v1/requests
-Authorization: Basic S2VsbGVyOkp4S1IyR1ZRSUz5QlczVW0=
-```
-
-> O SGMD gera esse header automaticamente a partir das variaveis `INVGATE_USER` e `INVGATE_PASSWORD`.
+O SGMD verifica essas credenciais contra as variaveis de ambiente `INVGATE_USER` e `INVGATE_PASSWORD`. Nenhum token e gerado. A autenticacao e stateless.
 
 ---
 
-## 3. O Que Precisamos dos Analistas
+## 3. Autenticacao Dual no Backend SGMD
 
-Para configurar a integracao corretamente, precisamos que os analistas levantem as seguintes informacoes diretamente no InvGate:
+O backend aceita **dois metodos** de autenticacao nos endpoints `/api/changes`:
 
-### 3.1 Identificar a Categoria de Mudanca no InvGate
-
-No InvGate, as mudancas sao tratadas como **Requests** (solicitacoes) vinculadas a uma **categoria** e/ou **workflow** especifico de Gerenciamento de Mudancas.
-
-**Acao necessaria:**
-- [ ] Informar o **ID da categoria** (category_id) utilizada para registros de mudanca no InvGate
-- [ ] Informar o **nome da categoria** (ex: "Gerenciamento de Mudancas", "Change Management", "RFC")
-- [ ] Caso exista mais de uma categoria para tipos diferentes de mudanca, listar todas
-
-| Categoria no InvGate | Category ID | Tipo de Mudanca |
+| Metodo | Quem Usa | Como Funciona |
 |---|---|---|
-| (preencher) | (preencher) | (preencher) |
-| (preencher) | (preencher) | (preencher) |
+| **HTTP Basic Auth** | InvGate (Web Service) | Header `Authorization: Basic base64(user:pass)` — verificado primeiro |
+| **JWT (Cookie/Bearer)** | Usuarios logados no frontend | Token JWT via cookie ou header `Authorization: Bearer <token>` |
 
-### 3.2 Levantar os Campos Customizados (Custom Fields)
+- Se Basic Auth for valido → mudanca registrada com `created_by = "InvGate ITSM"`
+- Se JWT for valido → mudanca registrada com `created_by = nome do usuario`
+- Se nenhum for valido → HTTP 401 "Nao autenticado"
 
-Os campos personalizados do processo de mudanca no InvGate possuem um **UID** (identificador unico). Precisamos saber qual UID corresponde a cada campo do SGMD.
+---
 
-**Como descobrir os UIDs:**
-A forma mais direta e acessar o endpoint da API:
-```
-GET https://aguservicos.agu.gov.br/api/v1/cf.fields.all
-Authorization: Basic base64(usuario:senha)
-```
+## 4. Mapeamento de Campos (InvGate -> SGMD)
 
-Ou, para campos de uma categoria especifica:
-```
-GET https://aguservicos.agu.gov.br/api/v1/cf.fields.by.category?category_id=<ID>
-Authorization: Basic base64(usuario:senha)
-```
+### 4.1 Campos Configurados no Web Service (Envio de variaveis)
 
-A resposta retornara uma lista com todos os campos customizados, incluindo `uid`, `label` (nome) e `type` (tipo).
+Estes campos ja estao mapeados no workflow do InvGate:
 
-**Alternativamente**, os analistas podem identificar os campos pela interface administrativa do InvGate em:
-> **Configuracoes > Solicitacoes > Campos Personalizados**
-
-### 3.3 Tabela de Mapeamento de Campos
-
-Preencher a tabela abaixo com o UID correspondente de cada campo no InvGate:
-
-| # | Campo no SGMD | Descricao | Campo no InvGate (Nome) | UID no InvGate | Tipo do Campo | Observacoes |
-|---|---|---|---|---|---|---|
-| 1 | `titulo` | Titulo da mudanca | `title` (nativo) | -- (nativo) | Texto | Campo nativo do InvGate |
-| 2 | `descricao` | Descricao detalhada | `description` (nativo) | -- (nativo) | Texto | Campo nativo do InvGate |
-| 3 | `status` | Status da mudanca | `status` (nativo) | -- (nativo) | Enum | Ver secao 3.4 |
-| 4 | `frente_atuacao` | Infraestrutura / Sistemas / SuperSapiens | (preencher) | (preencher) | Lista | |
-| 5 | `natureza_mudanca` | Planejada / Baixo Risco / Emergencial | (preencher) | (preencher) | Lista | |
-| 6 | `categoria_mudanca` | Preventiva / Corretiva / Evolutiva / etc. | (preencher) | (preencher) | Lista | |
-| 7 | `risco` | Alto / Medio / Baixo | (preencher) | (preencher) | Lista | |
-| 8 | `numero_rfc` | Numero do RFC | (preencher) | (preencher) | Texto | |
-| 9 | `responsavel_negocio` | Responsavel do negocio | (preencher) | (preencher) | Texto/Usuario | |
-| 10 | `sistemas_afetados` | Sistemas impactados | (preencher) | (preencher) | Texto | |
-| 11 | `servicos_impactados` | Servicos impactados | (preencher) | (preencher) | Texto | |
-| 12 | `justificativa` | Motivo da mudanca | (preencher) | (preencher) | Texto Longo | |
-| 13 | `plano_rollback` | Plano de reversao | (preencher) | (preencher) | Texto Longo | |
-| 14 | `ambiente_homologado` | Sim / Nao / N/A | (preencher) | (preencher) | Lista | |
-| 15 | `versao_sistema` | Versao do sistema | (preencher) | (preencher) | Texto | |
-| 16 | `data_inicio` | Data/hora inicio | (preencher) | (preencher) | Data/Hora | |
-| 17 | `data_fim` | Data/hora termino | (preencher) | (preencher) | Data/Hora | |
-
-> **Importante**: Campos que nao existem no InvGate podem ser deixados em branco. Campos que existem no InvGate mas nao no SGMD tambem devem ser informados para avaliacao de inclusao futura.
-
-### 3.4 Mapeamento de Status
-
-O SGMD possui os seguintes status. Informar qual status do InvGate corresponde a cada um:
-
-| Status no SGMD | Label no SGMD | Status no InvGate (Nome) | Status ID no InvGate |
-|---|---|---|---|
-| `planejada` | Planejada | (preencher) | (preencher) |
-| `aprovada` | Aprovada | (preencher) | (preencher) |
-| `em_execucao` | Em Execucao | (preencher) | (preencher) |
-| `concluida` | Concluida | (preencher) | (preencher) |
-| `cancelada` | Cancelada | (preencher) | (preencher) |
-
-**Como obter os status do InvGate:**
-```
-GET https://aguservicos.agu.gov.br/api/v1/requests/statuses
-Authorization: Basic base64(usuario:senha)
-```
-
-### 3.5 Mapeamento de Valores de Listas
-
-Para campos do tipo **Lista** (Frente de Atuacao, Natureza, Categoria, Risco), precisamos saber quais sao os valores disponiveis no InvGate e como eles se mapeiam aos valores do SGMD.
-
-**Exemplo - Campo "Risco":**
-
-| Valor no SGMD | Label no SGMD | Valor no InvGate | ID da Opcao no InvGate |
-|---|---|---|---|
-| `alto` | Alto | (preencher) | (preencher) |
-| `medio` | Medio | (preencher) | (preencher) |
-| `baixo` | Baixo | (preencher) | (preencher) |
-
-> Repetir esta tabela para cada campo do tipo Lista (itens 4 a 7 e 14 da tabela de mapeamento).
-
-### 3.6 Mapeamento do Resultado da Conclusao
-
-Quando uma mudanca e concluida, o SGMD registra o resultado. Informar o equivalente no InvGate:
-
-| Resultado no SGMD | Label | Campo/Valor no InvGate |
+| Campo SGMD | Variavel InvGate | Tipo |
 |---|---|---|
-| `sucesso` | Executada com sucesso | (preencher) |
-| `sucesso_ressalvas` | Com ressalvas | (preencher) |
-| `sem_sucesso` | Sem sucesso (Rollback) | (preencher) |
+| `titulo` | Inicio - Titulo da Mudanca | Texto |
+| `responsavel_negocio` | Inicio - Responsavel do Negocio | Texto |
+| `sistemas_afetados` | Inicio - Sistemas ou Areas Impactadas | Texto |
+| `data_inicio` | Inicio - Data e Hora de Inicio (Data e hora DMY) | Data/Hora |
+| `data_fim` | Inicio - Data e Hora de Finalizacao (Data e hora DMY) | Data/Hora |
+| `categoria_mudanca` | Categoria da Mudanca | Lista |
 
----
+### 4.2 Campos com Valor Padrao
 
-## 4. Informacoes Adicionais Necessarias
+Campos que o SGMD preenche automaticamente quando nao enviados pelo InvGate:
 
-### 4.1 Filtros de Importacao
+| Campo SGMD | Valor Padrao | Pode ser adicionado ao InvGate? |
+|---|---|---|
+| `status` | `planejada` | Sim, via Envio de variaveis |
+| `frente_atuacao` | `sistemas` | Sim, valores: `infraestrutura`, `sistemas`, `supersapiens` |
+| `natureza_mudanca` | `planejada_normal` | Sim, valores: `planejada_normal`, `baixo_risco`, `emergencial` |
+| `risco` | `medio` | Sim, valores: `alto`, `medio`, `baixo` |
+| `plano_rollback` | (vazio) | Sim |
+| `numero_rfc` | (vazio) | Sim |
+| `justificativa` | (vazio) | Sim |
+| `descricao` | (vazio) | Sim |
 
-- [ ] Devemos importar **todas** as mudancas ou apenas de um periodo especifico? (Ex: ultimos 6 meses)
-- [ ] Devemos filtrar por algum **help desk** ou **grupo** especifico?
-- [ ] Existe algum **workflow** especifico para mudancas que devemos considerar?
+### 4.3 Campos Automaticos (gerados pelo SGMD)
 
-### 4.2 Frequencia de Sincronizacao
-
-| Opcao | Descricao |
+| Campo | Descricao |
 |---|---|
-| **Tempo real** | A cada mudanca criada/atualizada no InvGate, o SGMD e notificado (requer webhook/trigger) |
-| **Periodica** | O SGMD consulta o InvGate a cada X minutos (ex: a cada 15 min, 30 min, 1 hora) |
-| **Manual** | O usuario clica um botao "Sincronizar" no SGMD para puxar as mudancas |
+| `id` | UUID gerado automaticamente |
+| `created_at` | Timestamp de criacao (UTC) |
+| `updated_at` | Timestamp de atualizacao (UTC) |
+| `created_by` | "InvGate ITSM" (quando via Basic Auth) |
 
-- [ ] Qual frequencia e mais adequada para o processo?
+### 4.4 Valores Aceitos para Campos de Lista
 
-### 4.3 Campos Adicionais do InvGate
+**categoria_mudanca:**
+`novo_servico`, `preventiva`, `adaptativa`, `corretiva`, `evolutiva`, `desativacao`, `deploy`, `teste_vulnerabilidade`
 
-Caso existam campos no InvGate que nao estao listados na tabela de mapeamento (secao 3.3) mas que sao relevantes para o processo de mudanca, listar abaixo:
+**frente_atuacao:**
+`infraestrutura`, `sistemas`, `supersapiens`
 
-| Campo no InvGate | UID | Tipo | Deve ser exibido no SGMD? | Observacoes |
-|---|---|---|---|---|
-| (preencher) | (preencher) | (preencher) | Sim/Nao | (preencher) |
+**natureza_mudanca:**
+`planejada_normal`, `baixo_risco`, `emergencial`
 
----
+**risco:**
+`alto`, `medio`, `baixo`
 
-## 5. Endpoints da API InvGate - Referencia Rapida
+**status:**
+`planejada`, `aprovada`, `em_execucao`, `concluida`, `cancelada`
 
-Todas as chamadas utilizam **HTTP Basic Auth**. O header `Authorization` e gerado automaticamente pelo SGMD.
+**ambiente_homologado:**
+`sim`, `nao`, `nao_se_aplica`
 
-### 5.1 Listar Campos Customizados
-```
-GET https://aguservicos.agu.gov.br/api/v1/cf.fields.all
-Authorization: Basic base64(Keller:<senha>)
-```
-
-### 5.2 Listar Campos por Categoria
-```
-GET https://aguservicos.agu.gov.br/api/v1/cf.fields.by.category?category_id=<ID>
-Authorization: Basic base64(Keller:<senha>)
-```
-
-### 5.3 Listar Status Disponiveis
-```
-GET https://aguservicos.agu.gov.br/api/v1/requests/statuses
-Authorization: Basic base64(Keller:<senha>)
-```
-
-### 5.4 Listar Tipos de Request
-```
-GET https://aguservicos.agu.gov.br/api/v1/requests/types
-Authorization: Basic base64(Keller:<senha>)
-```
-
-### 5.5 Listar Mudancas (Requests)
-```
-GET https://aguservicos.agu.gov.br/api/v1/requests?category_id=<ID>
-Authorization: Basic base64(Keller:<senha>)
-```
-
-### 5.6 Detalhes de uma Mudanca
-```
-GET https://aguservicos.agu.gov.br/api/v1/requests/<REQUEST_ID>
-Authorization: Basic base64(Keller:<senha>)
-```
-
-### 5.7 Campos Customizados de uma Mudanca
-```
-GET https://aguservicos.agu.gov.br/api/v1/requests/<REQUEST_ID>/custom-fields
-Authorization: Basic base64(Keller:<senha>)
-```
-
-> **Documentacao completa**: https://releases.invgate.com/service-desk/api/
+**resultado_conclusao** (quando status = concluida):
+`sucesso`, `sucesso_ressalvas`, `sem_sucesso`
 
 ---
 
-## 6. Checklist Resumo para os Analistas
+## 5. Exemplo de Payload JSON
 
-- [ ] **Credenciais globais** configuradas no InvGate (HTTP Basic Auth, usuario: Keller)
-- [ ] **Category ID** da(s) categoria(s) de mudanca no InvGate
-- [ ] **Tabela de mapeamento de campos** preenchida (secao 3.3)
-- [ ] **Tabela de mapeamento de status** preenchida (secao 3.4)
-- [ ] **Valores das listas** mapeados para cada campo enum (secao 3.5)
-- [ ] **Resultado da conclusao** mapeado (secao 3.6)
-- [ ] **Filtros de importacao** definidos (secao 4.1)
-- [ ] **Frequencia de sincronizacao** definida (secao 4.2)
-- [ ] **Campos adicionais** do InvGate identificados (secao 4.3)
+Exemplo do JSON que o InvGate envia ao SGMD:
+
+```json
+{
+  "titulo": "Deploy SAPIENS v4.3 - Atualizacao de Modulo",
+  "responsavel_negocio": "João Silva",
+  "sistemas_afetados": "SAPIENS, SEI",
+  "data_inicio": "2026-04-20T10:00",
+  "data_fim": "2026-04-20T14:00",
+  "categoria_mudanca": "deploy"
+}
+```
+
+Campos opcionais que podem ser adicionados:
+```json
+{
+  "titulo": "Deploy SAPIENS v4.3 - Atualizacao de Modulo",
+  "responsavel_negocio": "João Silva",
+  "sistemas_afetados": "SAPIENS, SEI",
+  "data_inicio": "2026-04-20T10:00",
+  "data_fim": "2026-04-20T14:00",
+  "categoria_mudanca": "deploy",
+  "frente_atuacao": "supersapiens",
+  "natureza_mudanca": "planejada_normal",
+  "risco": "alto",
+  "numero_rfc": "RFC-2026-0150",
+  "plano_rollback": "Reverter para versao 4.2",
+  "justificativa": "Correcao de vulnerabilidade critica"
+}
+```
 
 ---
 
-## 7. Contato
+## 6. Variaveis de Ambiente no Servidor SGMD
 
-Em caso de duvidas tecnicas sobre a API ou sobre este documento, entrar em contato com a equipe de desenvolvimento do SGMD.
+Variaveis adicionadas no `backend/.env` para a integracao:
+
+| Variavel | Valor | Descricao |
+|---|---|---|
+| `INVGATE_BASE_URL` | `https://aguservicos.agu.gov.br` | URL base do InvGate |
+| `INVGATE_USER` | `Keller` | Usuario para HTTP Basic Auth |
+| `INVGATE_PASSWORD` | `JxKR2GVQIFyBW3Um` | Senha para HTTP Basic Auth |
+
+> Essas variaveis devem estar configuradas no servidor de producao (`sgmd.agu.gov.br`).
+
+---
+
+## 7. Diferencas da Build (Ontem vs Hoje)
+
+### 7.1 Arquivos Alterados
+
+| Arquivo | O que Mudou |
+|---|---|
+| `backend/server.py` | Adicionada autenticacao dual (Basic Auth + JWT). Funcoes `verify_basic_auth()` e `get_user_or_integration()`. Campos `plano_rollback` e `categoria_mudanca` agora opcionais. Imports: `base64`, `secrets` |
+| `backend/.env` | Adicionadas variaveis `INVGATE_BASE_URL`, `INVGATE_USER`, `INVGATE_PASSWORD` |
+| `frontend/public/index.html` | Sem mudanca funcional (badge Emergent pode ser removido no deploy) |
+| `frontend/public/aguservicos-logo.png` | Logo AGU Servicos adicionada |
+| `frontend/src/pages/LoginPage.jsx` | Logo AGU centralizada no formulario, texto "Bem-vindo(a)...", placeholder `seuemail@agu.gov.br` |
+| `frontend/src/components/GovHeader.jsx` | Logo AGU na barra azul, link clicavel sem negrito |
+| `frontend/src/components/CalendarGrid.jsx` | Borda vermelha + tag "EMERGENCIAL" (mantendo cor do status) |
+
+### 7.2 O que Fazer no Deploy
+
+1. **Atualizar `backend/.env`** com as 3 novas variaveis do InvGate
+2. **Copiar `aguservicos-logo.png`** para `frontend/public/`
+3. **Rebuildar o frontend** (as mudancas de JSX precisam de build)
+4. **Reiniciar o backend** (mudancas no server.py + novas variaveis .env)
+
+---
+
+## 8. Teste da Integracao
+
+### 8.1 Teste via curl (simula o InvGate)
+
+```bash
+curl -X POST https://sgmd.agu.gov.br/api/changes \
+  -u "Keller:JxKR2GVQIFyBW3Um" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "titulo": "Teste Integracao InvGate",
+    "responsavel_negocio": "Analista Teste",
+    "sistemas_afetados": "SAPIENS",
+    "data_inicio": "2026-04-25T10:00",
+    "data_fim": "2026-04-25T12:00",
+    "categoria_mudanca": "deploy"
+  }'
+```
+
+**Resposta esperada** (HTTP 201):
+```json
+{
+  "titulo": "Teste Integracao InvGate",
+  "status": "planejada",
+  "created_by": "InvGate ITSM",
+  ...
+}
+```
+
+### 8.2 Teste de Seguranca
+
+```bash
+# Sem autenticacao (deve retornar 401)
+curl -X POST https://sgmd.agu.gov.br/api/changes \
+  -H "Content-Type: application/json" \
+  -d '{"titulo":"Teste","data_inicio":"2026-04-25T10:00"}'
+
+# Senha errada (deve retornar 401)
+curl -X POST https://sgmd.agu.gov.br/api/changes \
+  -u "Keller:senhaerrada" \
+  -H "Content-Type: application/json" \
+  -d '{"titulo":"Teste","data_inicio":"2026-04-25T10:00"}'
+```
+
+---
+
+## 9. Checklist de Deploy
+
+- [ ] Variaveis `INVGATE_USER`, `INVGATE_PASSWORD`, `INVGATE_BASE_URL` configuradas no servidor
+- [ ] `server.py` atualizado com autenticacao dual
+- [ ] `aguservicos-logo.png` copiado para `frontend/public/`
+- [ ] Frontend rebuildado (`yarn build` ou `npm run build`)
+- [ ] Backend reiniciado
+- [ ] Credencial SGMD-Integracao configurada no InvGate (HTTP Basic Auth)
+- [ ] Web Service do workflow apontando para `https://sgmd.agu.gov.br/api/changes`
+- [ ] Teste via curl bem-sucedido
+- [ ] Badge "Made with Emergent" removido do `index.html` (se aplicavel)
 
 ---
 
